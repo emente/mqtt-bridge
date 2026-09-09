@@ -1,0 +1,32 @@
+-- ^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-
+-- 
+-- module: RTCM corrections extended message
+-- 
+-- ^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-^-
+
+RTCMEM-PDU-Descriptions {
+    itu-t (0) identified-organization (4) etsi (0) itsDomain (5) wg1 (1) en (103301) rtcmem (5) version1 (1)
+}
+
+DEFINITIONS AUTOMATIC TAGS ::= 
+
+BEGIN
+
+-- NOTE: upstream (forge.etsi.org ITS/asn1/is_ts103301, release2) imports
+-- RTCMcorrections from a module literally named "DSRC" under an ISO OID
+-- that isn't published as a standalone file; every sibling PDU module in
+-- the same repo (MAPEM/SPATEM/SREM/SSEM) instead imports from
+-- "ETSI-ITS-DSRC", which does define RTCMcorrections (see dsrc_2_2_1.asn).
+-- Repointed here to match that sibling convention and what's actually
+-- bundled in asn1/.
+IMPORTS
+RTCMcorrections FROM ETSI-ITS-DSRC { itu-t (0) identified-organization (4) etsi (0) itsDomain (5) wg1 (1) ts103301 (103301) dsrc (6) major-version-2 (2) minor-version-1 (1) }
+ItsPduHeader FROM ITS-Container {  itu-t (0) identified-organization (4) etsi (0) itsDomain (5) wg1 (1) ts (102894) cdd (2) version (2)};
+
+
+RTCMEM ::= SEQUENCE {
+    header  ItsPduHeader,	
+    rtcmc   RTCMcorrections
+}
+
+END

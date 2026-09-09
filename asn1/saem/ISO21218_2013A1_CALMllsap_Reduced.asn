@@ -1,0 +1,28 @@
+CALMllsap {iso(1) standard(0) calm-ll-sap(21218) asnm-1 (1) version1(1)} 
+
+-- reduced version for use with the module SAEM-PDU-Descriptions
+
+DEFINITIONS AUTOMATIC TAGS::=
+
+BEGIN
+
+MedType::=INTEGER{
+	unknown	(0),
+	any	(1),
+	iso21212	(2), -- 2G
+	iso21213	(3), -- 3G
+	iso21214	(4), -- IR
+	iso21215	(5), -- M5
+	iso21216	(6), -- MM
+	iso25112	(7), -- 802.16e
+	iso25113	(8), -- HC-SDMA
+	iso29283	(9), -- 802.20
+	iso17515	(10), -- LTE
+	iso19079	(11), -- 6LowPAN
+	iso15628	(128), -- DSRC
+	can			(254),
+	ethernet	(255)
+	} (0..255)
+
+
+END

@@ -1,0 +1,12 @@
+ITSlm { iso (1) standard (0) localized (16460) lm(1) version0 (0)}  
+
+-- reduced version for use with the module SAEM-PDU-Descriptions
+
+DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+
+PortNumber::=INTEGER(0..65535)
+
+
+
+END
