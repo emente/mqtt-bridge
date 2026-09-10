@@ -52,10 +52,27 @@ CREATE TABLE IF NOT EXISTS devices (
     hardware_version     VARCHAR(32)  NULL,
     last_status          ENUM('online','offline') NULL,
     last_status_at        DATETIME(3)  NULL,
-    first_seen           DATETIME(3)  NOT NULL,
+    -- The bridge/sniffer has no GPS -- these are set manually (there's no
+    -- ingester code path that writes them) to the receiver's known fixed
+    -- install location, purely so the map viewer can draw a "receiver
+    -- line" from a station to whichever bridge picked it up. NULL means
+    -- unset; that device just doesn't get a receiver line.
+    latitude_deg          DECIMAL(10,7) NULL,
+    longitude_deg          DECIMAL(10,7) NULL,
+    first_seen           DATETIME(3) NOT NULL,
     last_seen            DATETIME(3)  NOT NULL,
     PRIMARY KEY (device_id)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before latitude_deg/longitude_deg
+-- existed? Run this instead of re-running the CREATE TABLE above:
+--
+-- ALTER TABLE devices
+--     ADD COLUMN latitude_deg  DECIMAL(10,7) NULL,
+--     ADD COLUMN longitude_deg DECIMAL(10,7) NULL;
+--
+-- Then set each receiver's real position by hand, e.g.:
+-- UPDATE devices SET latitude_deg = 49.0057, longitude_deg = 8.3948 WHERE device_id = 'its-g5-bridge-xxxxxx';
 
 CREATE TABLE IF NOT EXISTS device_stats (
     id                       BIGINT UNSIGNED AUTO_INCREMENT,
@@ -330,7 +347,12 @@ CREATE TABLE IF NOT EXISTS traffic_light_states (
     station_id         INT UNSIGNED NULL,
 
     event_state        VARCHAR(40)  NULL,   -- e.g. 'protected-Movement-Allowed', 'stop-And-Remain'
-    min_end_time       INT UNSIGNED NULL,   -- TimeMark: 1/10 s within the current UTC minute
+    -- TimeMark (dsrc_2_2_1.asn): tenths of a second into the current OR
+    -- NEXT UTC hour (not minute), 0-36000; 36000 = indefinite future,
+    -- 36001 = unknown/undefined. Resolving to an absolute time needs the
+    -- current-hour-vs-next-hour disambiguation described there -- see
+    -- timeMarkToDate() in citsviewer/app.js.
+    min_end_time       INT UNSIGNED NULL,
     max_end_time       INT UNSIGNED NULL,
     likely_end_time    INT UNSIGNED NULL,
 
