@@ -47,6 +47,7 @@ decode failing" investigation starts here instead of from scratch.
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from pathlib import Path
@@ -514,4 +515,95 @@ def extract_spatem_fields(decoded: dict) -> list:
                 "max_end_time": timing.get("maxEndTime"),
                 "likely_end_time": timing.get("likelyTime"),
             })
+    return out
+
+
+# --------------------------------------------------------------------------
+# MAPEM (intersection / lane topology -- the geometry SPATEM's signal states
+# apply to)
+# --------------------------------------------------------------------------
+
+_ELEVATION_UNAVAILABLE = -4096
+_METRES_PER_DEGREE = 111320.0  # good enough for intersection-scale offsets
+
+
+def _elevation_m(value: Optional[int]) -> Optional[float]:
+    return None if value is None or value == _ELEVATION_UNAVAILABLE else value / 10.0
+
+
+def _decode_node_list(node_list: Optional[tuple], start_lat: float, start_lon: float) -> list:
+    """NodeListXY is a CHOICE; only the common 'nodes' (NodeSetXY) alternative
+    is handled here -- 'computed' (ComputedLane: a reference to another
+    lane's path plus a transform) and 'regional' extensions are rare in
+    practice and are skipped rather than guessed at.
+
+    Each NodeXY is normally an X/Y offset in centimetres from the previous
+    point (DSRC Node-XY-*b types; the first node offsets from the
+    intersection's refPoint), except the 'node-LatLon' alternative which
+    gives an absolute lat/lon and becomes the new anchor for subsequent
+    offsets. Offsets are converted to lat/lon with a flat-earth
+    (equirectangular) approximation centred on the current anchor --
+    inaccurate over long distances, but lane node spacing is metres, so this
+    is well under GPS accuracy at the scale a live map needs."""
+    if not (isinstance(node_list, tuple) and len(node_list) == 2 and node_list[0] == "nodes"):
+        return []
+    points = []
+    lat, lon = start_lat, start_lon
+    for node in node_list[1] or []:
+        delta = node.get("delta")
+        if not (isinstance(delta, tuple) and len(delta) == 2):
+            continue
+        kind, value = delta
+        if kind == "node-LatLon":
+            new_lat = _deg(value.get("lat"), _LAT_UNAVAILABLE)
+            new_lon = _deg(value.get("lon"), _LON_UNAVAILABLE)
+            if new_lat is None or new_lon is None:
+                continue
+            lat, lon = new_lat, new_lon
+        elif kind.startswith("node-XY"):
+            x_cm, y_cm = value.get("x"), value.get("y")
+            if x_cm is None or y_cm is None:
+                continue
+            lat += (y_cm / 100.0) / _METRES_PER_DEGREE
+            cos_lat = math.cos(math.radians(lat)) or 1e-9
+            lon += (x_cm / 100.0) / (_METRES_PER_DEGREE * cos_lat)
+        else:
+            continue
+        points.append([round(lon, 7), round(lat, 7)])
+    return points
+
+
+def extract_mapem_fields(decoded: dict) -> list:
+    """One dict per intersection described in the MapData. Lane geometry is
+    resolved into absolute lon/lat polylines (see `_decode_node_list`) so
+    downstream consumers (the map viewer) don't need to redo the offset
+    accumulation themselves."""
+    out = []
+    map_data = decoded.get("map", {})
+    for isec in map_data.get("intersections") or []:
+        ref = isec.get("id", {})
+        ref_point = isec.get("refPoint") or {}
+        lat = _deg(ref_point.get("lat"), _LAT_UNAVAILABLE)
+        lon = _deg(ref_point.get("long"), _LON_UNAVAILABLE)
+        if lat is None or lon is None:
+            continue
+        lanes = []
+        for lane in isec.get("laneSet") or []:
+            lanes.append({
+                "lane_id": lane.get("laneID"),
+                "name": lane.get("name"),
+                "ingress_approach": lane.get("ingressApproach"),
+                "egress_approach": lane.get("egressApproach"),
+                "points": _decode_node_list(lane.get("nodeList"), lat, lon),
+            })
+        out.append({
+            "intersection_id": ref.get("id"),
+            "region": ref.get("region"),
+            "name": isec.get("name"),
+            "revision": isec.get("revision"),
+            "latitude_deg": lat,
+            "longitude_deg": lon,
+            "altitude_m": _elevation_m(ref_point.get("elevation")),
+            "lanes": lanes,
+        })
     return out

@@ -199,6 +199,12 @@ CREATE TABLE IF NOT EXISTS stations (
     vehicle_length_m          DECIMAL(5,1) NULL,
     vehicle_width_m           DECIMAL(4,1) NULL,
 
+    -- Latest trailer(s) reported for this station via CPM (see
+    -- cpm_messages.trailers_json for the same shape). Only CPM carries
+    -- trailer data, so a CAM/DENM upsert for the same station leaves this
+    -- column untouched (COALESCE in the upsert) rather than clearing it.
+    trailer_json              LONGTEXT NULL,
+
     first_seen                DATETIME(3) NOT NULL,
     last_seen                 DATETIME(3) NOT NULL,
 
@@ -206,6 +212,12 @@ CREATE TABLE IF NOT EXISTS stations (
     KEY idx_stations_last_seen (last_seen),
     SPATIAL KEY idx_stations_position (position)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before trailer_json existed? Run
+-- this instead of re-running the CREATE TABLE above (a no-op once the table
+-- already exists):
+--
+-- ALTER TABLE stations ADD COLUMN trailer_json LONGTEXT NULL;
 
 -- ---------------------------------------------------------------------------
 -- DENM hazard/event markers: one row per (originating station, action
@@ -304,7 +316,8 @@ CREATE TABLE IF NOT EXISTS cpm_perceived_objects (
 -- "what's the current signal state" directly. Only the current (nearest-
 -- term) phase is kept, not predicted future ones. No position is stored --
 -- SPATEM doesn't carry intersection geometry, that's in the corresponding
--- MAPEM, which isn't cross-referenced here.
+-- MAPEM (see `intersections` below); join on (region, intersection_id) to
+-- place a signal state on the map.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS traffic_light_states (
@@ -327,4 +340,43 @@ CREATE TABLE IF NOT EXISTS traffic_light_states (
     PRIMARY KEY (id),
     UNIQUE KEY uq_traffic_light_group (region, intersection_id, signal_group),
     KEY idx_traffic_light_last_seen (last_received_at)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------------
+-- Intersection / lane geometry from MAPEM, upserted in place per
+-- (region, intersection_id) like `stations`/`denm_events` -- a MAPEM
+-- normally repeats unchanged until the physical layout is revised (tracked
+-- via `revision`), so only the latest copy is worth keeping. `lanes_json` is
+-- a JSON array of {lane_id, name, ingress_approach, egress_approach, points}
+-- with `points` an already-resolved [[lon,lat], ...] polyline (see
+-- its_decoder.extract_mapem_fields -- the ingester does the NodeXY offset
+-- accumulation so consumers don't have to). Join against
+-- `traffic_light_states` on (region, intersection_id) to place a live
+-- signal state at this intersection's position.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS intersections (
+    intersection_id     INT UNSIGNED NOT NULL,
+    region               INT UNSIGNED NOT NULL DEFAULT 0,  -- 0 = region not specified (IntersectionReferenceID.region is OPTIONAL)
+
+    device_id             VARCHAR(16)  NOT NULL,
+    station_id             INT UNSIGNED NULL,
+
+    name                    VARCHAR(64)  NULL,
+    revision                 TINYINT UNSIGNED NULL,
+
+    latitude_deg              DECIMAL(10,7) NOT NULL,
+    longitude_deg               DECIMAL(10,7) NOT NULL,
+    altitude_m                    DECIMAL(8,2) NULL,
+    position                        POINT NOT NULL,
+
+    lanes_json                       LONGTEXT NULL,
+    decoded_json                       LONGTEXT NULL,
+
+    first_received_at                   DATETIME(3) NOT NULL,
+    last_received_at                     DATETIME(3) NOT NULL,
+
+    PRIMARY KEY (region, intersection_id),
+    KEY idx_intersections_last_seen (last_received_at),
+    SPATIAL KEY idx_intersections_position (position)
 ) ENGINE=InnoDB;

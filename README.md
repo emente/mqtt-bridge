@@ -70,7 +70,10 @@ mqtt_to_mysql.py --help`.
 - **`stations`** -- latest known position per station, upserted in place.
   This is what a live map should query for "what's out there right now" --
   it stays small regardless of how long the bridge has been running. Also
-  updated by CPM (see below), tagged via `last_message_type`.
+  updated by CPM (see below), tagged via `last_message_type`. If the station
+  has reported a trailer via CPM, its latest trailer data is kept in
+  `trailer_json` (untouched by CAM/DENM upserts for the same station, which
+  carry no trailer data of their own).
 - **`denm_events`** -- one row per DENM action (`originatingStationId` +
   `sequenceNumber`), upserted as updates/repetitions arrive. Query `WHERE
   is_active` for hazards currently in effect.
@@ -84,9 +87,14 @@ mqtt_to_mysql.py --help`.
   lands in `trailers_json`.
 - **`traffic_light_states`** -- current signal phase per
   (region, intersection, signal group) from SPATEM, upserted in place like
-  `stations`. No position is stored -- that's in the corresponding MAPEM,
-  which isn't cross-referenced here (matching by `intersection_id`/`region`
-  is on you, or ask for that to be wired up too).
+  `stations`. No position is stored -- that's in `intersections` (below);
+  join on `(region, intersection_id)` to place a signal on a map.
+- **`intersections`** -- intersection reference point and lane geometry from
+  MAPEM, upserted in place per `(region, intersection_id)`. `lanes_json` is
+  each lane's node list already resolved into an absolute `[[lon,lat], ...]`
+  polyline (the NodeXY offset-accumulation and node-LatLon anchor switches
+  are handled once here, in `its_decoder.extract_mapem_fields`, rather than
+  by every consumer).
 - **`devices` / `device_stats`** -- bridge (not vehicle) bookkeeping, from
   the `status`/`info`/`stats` topics. `device_stats` also carries the
   `sniffer_*` columns (uptime, sent/dropped packet counts, queue depth,

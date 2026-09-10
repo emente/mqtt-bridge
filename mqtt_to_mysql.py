@@ -200,13 +200,17 @@ def upsert_station(db: Database, device_id: str, station_id: int, station_type: 
     lat, lon = fields.get("latitude_deg"), fields.get("longitude_deg")
     if lat is None or lon is None:
         return
+    # trailer_json only comes from CPM (fields["trailers"]); CAM/DENM upserts
+    # pass no trailer data at all, so COALESCE keeps whatever was last known
+    # instead of wiping it out on every non-CPM update for the same station.
+    trailers = fields.get("trailers")
     db.execute(
         """
         INSERT INTO stations (station_id, device_id, station_type, last_message_type,
                                latitude_deg, longitude_deg, altitude_m, position,
                                heading_deg, speed_m_s, vehicle_length_m, vehicle_width_m,
-                               first_seen, last_seen)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, POINT(%s, %s), %s, %s, %s, %s, %s, %s)
+                               trailer_json, first_seen, last_seen)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, POINT(%s, %s), %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE device_id = VALUES(device_id),
                                  station_type = VALUES(station_type),
                                  last_message_type = VALUES(last_message_type),
@@ -218,12 +222,14 @@ def upsert_station(db: Database, device_id: str, station_id: int, station_type: 
                                  speed_m_s = VALUES(speed_m_s),
                                  vehicle_length_m = VALUES(vehicle_length_m),
                                  vehicle_width_m = VALUES(vehicle_width_m),
+                                 trailer_json = COALESCE(VALUES(trailer_json), trailer_json),
                                  last_seen = VALUES(last_seen)
         """,
         (station_id, device_id, station_type, message_type,
          lat, lon, fields.get("altitude_m"), lon, lat,
          fields.get("heading_deg"), fields.get("speed_m_s"),
          fields.get("vehicle_length_m"), fields.get("vehicle_width_m"),
+         dumps(trailers) if trailers else None,
          now, now),
     )
 
@@ -369,6 +375,36 @@ def store_spatem(db: Database, device_id: str, station_id: int, now: datetime.da
         )
 
 
+def store_mapem(db: Database, device_id: str, station_id: int, now: datetime.datetime, decoded: dict) -> None:
+    for isec in its_decoder.extract_mapem_fields(decoded):
+        lat, lon = isec.get("latitude_deg"), isec.get("longitude_deg")
+        if lat is None or lon is None:
+            continue
+        lanes = isec.get("lanes") or []
+        db.execute(
+            """
+            INSERT INTO intersections (intersection_id, region, device_id, station_id, name, revision,
+                                        latitude_deg, longitude_deg, altitude_m, position,
+                                        lanes_json, decoded_json, first_received_at, last_received_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, POINT(%s, %s), %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE device_id = VALUES(device_id),
+                                     station_id = VALUES(station_id),
+                                     name = VALUES(name),
+                                     revision = VALUES(revision),
+                                     latitude_deg = VALUES(latitude_deg),
+                                     longitude_deg = VALUES(longitude_deg),
+                                     altitude_m = VALUES(altitude_m),
+                                     position = VALUES(position),
+                                     lanes_json = VALUES(lanes_json),
+                                     decoded_json = VALUES(decoded_json),
+                                     last_received_at = VALUES(last_received_at)
+            """,
+            (isec.get("intersection_id"), isec.get("region") or 0, device_id, station_id,
+             isec.get("name"), isec.get("revision"), lat, lon, isec.get("altitude_m"), lon, lat,
+             dumps(lanes) if lanes else None, dumps(decoded), now, now),
+        )
+
+
 def handle_packet(db: Database, device_id: str, topic: str, payload: bytes) -> None:
     now = utcnow()
 
@@ -449,6 +485,8 @@ def handle_packet(db: Database, device_id: str, topic: str, payload: bytes) -> N
             store_cpm(db, device_id, result.header.station_id, now, result.decoded, result.variant)
         elif result.message_type == "spatem":
             store_spatem(db, device_id, result.header.station_id, now, result.decoded)
+        elif result.message_type == "mapem":
+            store_mapem(db, device_id, result.header.station_id, now, result.decoded)
     except Exception:
         log.exception("[%s] failed to store %s fields for its_messages.id=%s",
                       device_id, result.message_type, its_message_id)
