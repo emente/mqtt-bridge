@@ -111,7 +111,9 @@ listening port; nothing else depends on it.
   the `status`/`info`/`stats` topics. `device_stats` also carries the
   `sniffer_*` columns (uptime, sent/dropped packet counts, queue depth,
   RSSI, age) relayed from the esp32-c5-sniffer's own stats, when the bridge
-  has received any -- these are link/hardware health, not map data.
+  has received any, plus `sd_found`/`sd_packets_written` for the bridge's
+  own SD card (packet logging, see SD_CARD.md in esp32-c3-bridge) -- these
+  are link/hardware health, not map data.
 
 ### Map viewer queries
 

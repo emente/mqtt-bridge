@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS device_stats (
     sniffer_queue_size       SMALLINT UNSIGNED NULL,
     sniffer_rssi_dbm         SMALLINT NULL,
     sniffer_age_ms           BIGINT UNSIGNED NULL,
+    -- The bridge's own SD card (packet logging, see SD_CARD.md) -- not the
+    -- sniffer's. sd_found reflects whether SD.begin() succeeded at boot;
+    -- sd_packets_written is a running total since the bridge's own last
+    -- power-up (not reset by "sddelete" starting a fresh log file).
+    sd_found                 BOOLEAN NULL,
+    sd_packets_written       BIGINT UNSIGNED NULL,
     PRIMARY KEY (id),
     KEY idx_device_stats_device_time (device_id, received_at)
 ) ENGINE=InnoDB;
@@ -108,6 +114,13 @@ CREATE TABLE IF NOT EXISTS device_stats (
 --     ADD COLUMN sniffer_queue_size      SMALLINT UNSIGNED NULL,
 --     ADD COLUMN sniffer_rssi_dbm        SMALLINT NULL,
 --     ADD COLUMN sniffer_age_ms          BIGINT UNSIGNED NULL;
+--
+-- Migrating an existing database created before sd_found/sd_packets_written
+-- existed? Run this instead:
+--
+-- ALTER TABLE device_stats
+--     ADD COLUMN sd_found           BOOLEAN NULL,
+--     ADD COLUMN sd_packets_written BIGINT UNSIGNED NULL;
 
 -- ---------------------------------------------------------------------------
 -- Raw packet archive (its/<device_id>/packet, before decoding)

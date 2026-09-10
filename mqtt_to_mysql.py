@@ -195,16 +195,21 @@ def handle_stats(db: Database, device_id: str, payload: bytes) -> None:
     # UART link (see sniffer_stats_t in esp32-c3-bridge.ino); absent means
     # not yet received, not necessarily that the sniffer is unhealthy.
     sniffer = stats.get("sniffer") or {}
+    # "sd" is the bridge's OWN SD card (packet logging), separate from the
+    # sniffer above -- absent on older firmware without SD support.
+    sd = stats.get("sd") or {}
     db.execute(
         """
         INSERT INTO device_stats (device_id, received_at, temp_c, rssi_dbm,
                                    sniffer_uptime_ms, sniffer_sent_packets, sniffer_dropped_packets,
-                                   sniffer_queued, sniffer_queue_size, sniffer_rssi_dbm, sniffer_age_ms)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   sniffer_queued, sniffer_queue_size, sniffer_rssi_dbm, sniffer_age_ms,
+                                   sd_found, sd_packets_written)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (device_id, now, stats.get("temp"), stats.get("rssi"),
          sniffer.get("uptime_ms"), sniffer.get("sent"), sniffer.get("dropped"),
-         sniffer.get("queued"), sniffer.get("queue_size"), sniffer.get("rssi"), sniffer.get("age_ms")),
+         sniffer.get("queued"), sniffer.get("queue_size"), sniffer.get("rssi"), sniffer.get("age_ms"),
+         sd.get("found"), sd.get("packets_written")),
     )
     upsert_device_seen(db, device_id, now)
 
