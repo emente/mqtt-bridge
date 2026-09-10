@@ -365,6 +365,30 @@ CREATE TABLE IF NOT EXISTS traffic_light_states (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------------
+-- Traffic light state HISTORY: append-only, one row per actual state
+-- CHANGE (not one per SPATEM -- a signal group is typically reported many
+-- times per minute with the same event_state, logging every single one
+-- would grow this unbounded for no benefit). store_spatem() only inserts
+-- here when the new event_state differs from what was already in
+-- traffic_light_states for that group, immediately before overwriting it.
+-- This is what citsviewer's "stats" feature (% time spent in each state)
+-- is computed from; traffic_light_states itself only ever holds the
+-- current phase, not history.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS traffic_light_state_history (
+    id                 BIGINT UNSIGNED AUTO_INCREMENT,
+    intersection_id    INT UNSIGNED NOT NULL,
+    region             INT UNSIGNED NOT NULL DEFAULT 0,
+    signal_group       INT UNSIGNED NOT NULL,
+    event_state        VARCHAR(40)  NULL,
+    changed_at         DATETIME(3)  NOT NULL,
+
+    PRIMARY KEY (id),
+    KEY idx_tl_history_group_time (region, intersection_id, signal_group, changed_at)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------------
 -- Intersection / lane geometry from MAPEM, upserted in place per
 -- (region, intersection_id) like `stations`/`denm_events` -- a MAPEM
 -- normally repeats unchanged until the physical layout is revised (tracked

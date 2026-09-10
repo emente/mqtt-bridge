@@ -11,6 +11,7 @@ See schema.sql for the table layout and README.md for setup instructions.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime
 import json
 import logging
@@ -22,6 +23,7 @@ from typing import Any, Optional
 import paho.mqtt.client as mqtt
 import pymysql
 import pymysql.cursors
+import websockets
 
 import its_decoder
 import its_layers
@@ -106,6 +108,18 @@ class Database:
                 with self.conn.cursor() as cur:
                     cur.executemany(sql, params_seq)
                     return
+            except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
+                if attempt == 2:
+                    raise
+                log.warning("MySQL connection lost (%s), reconnecting...", exc)
+                self.connect()
+
+    def query_one(self, sql: str, params: tuple = ()) -> Optional[tuple]:
+        for attempt in (1, 2):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return cur.fetchone()
             except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
                 if attempt == 2:
                     raise
@@ -355,6 +369,25 @@ def store_spatem(db: Database, device_id: str, station_id: int, now: datetime.da
         if intersection_id is None or signal_group is None:
             continue
         region = state.get("region") or 0
+        event_state = state.get("event_state")
+
+        # A signal group is reported many times a minute with an unchanged
+        # event_state; only log a history row when it actually differs from
+        # what's currently stored (read-before-write -- see
+        # traffic_light_state_history's own comment in schema.sql for why).
+        previous = db.query_one(
+            "SELECT event_state FROM traffic_light_states WHERE region = %s AND intersection_id = %s AND signal_group = %s",
+            (region, intersection_id, signal_group),
+        )
+        if previous is None or previous[0] != event_state:
+            db.execute(
+                """
+                INSERT INTO traffic_light_state_history (intersection_id, region, signal_group, event_state, changed_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (intersection_id, region, signal_group, event_state, now),
+            )
+
         db.execute(
             """
             INSERT INTO traffic_light_states (intersection_id, region, signal_group, device_id, station_id,
@@ -370,7 +403,7 @@ def store_spatem(db: Database, device_id: str, station_id: int, now: datetime.da
                                      last_received_at = VALUES(last_received_at)
             """,
             (intersection_id, region, signal_group, device_id, station_id,
-             state.get("event_state"), state.get("min_end_time"), state.get("max_end_time"),
+             event_state, state.get("min_end_time"), state.get("max_end_time"),
              state.get("likely_end_time"), now, now),
         )
 
@@ -487,9 +520,82 @@ def handle_packet(db: Database, device_id: str, topic: str, payload: bytes) -> N
             store_spatem(db, device_id, result.header.station_id, now, result.decoded)
         elif result.message_type == "mapem":
             store_mapem(db, device_id, result.header.station_id, now, result.decoded)
+        else:
+            return
+        ws_broadcast(result.message_type)
     except Exception:
         log.exception("[%s] failed to store %s fields for its_messages.id=%s",
                       device_id, result.message_type, its_message_id)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket live push -- a "something changed, go refetch" notification for
+# citsviewer's frontend, not a replacement for its HTTP polling (which stays
+# as the reliable fallback/source of truth). Deliberately NOT a duplicate of
+# api.php's query/JOIN logic over the wire: that would mean maintaining two
+# implementations of the same aggregation in two languages. Instead this
+# just tells already-connected browsers "poll now" the instant something is
+# stored, so updates feel close to real-time instead of waiting up to
+# POLL_MS; the browser still does its own fetch of api.php for the actual
+# data, same as it always did.
+#
+# paho-mqtt's client loop is synchronous and runs in its own thread
+# (client.loop_start(), see main()); this asyncio websockets server runs on
+# the main thread. ws_broadcast() is the bridge between them: it's called
+# from the (synchronous, background-thread) MQTT callback path and hops
+# into the asyncio loop via call_soon_threadsafe rather than touching
+# asyncio objects directly from the wrong thread.
+# ---------------------------------------------------------------------------
+
+_ws_clients: set = set()
+_ws_loop: Optional[asyncio.AbstractEventLoop] = None
+_ws_queue: Optional[asyncio.Queue] = None
+
+
+def ws_broadcast(kind: str) -> None:
+    if _ws_loop is None or _ws_queue is None:
+        return
+    try:
+        _ws_loop.call_soon_threadsafe(_ws_queue.put_nowait, kind)
+    except RuntimeError:
+        pass  # loop already closed (shutting down)
+
+
+async def _ws_broadcast_worker() -> None:
+    while True:
+        kind = await _ws_queue.get()
+        if not _ws_clients:
+            continue
+        message = json.dumps({"type": "update", "kind": kind})
+        results = await asyncio.gather(
+            *(client.send(message) for client in list(_ws_clients)), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                log.debug("WebSocket send failed (client presumably gone): %s", result)
+
+
+async def _ws_handler(websocket) -> None:
+    _ws_clients.add(websocket)
+    log.info("WebSocket client connected (%d total)", len(_ws_clients))
+    try:
+        async for _ in websocket:
+            pass  # clients don't send anything meaningful; just keep the connection open
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        _ws_clients.discard(websocket)
+        log.info("WebSocket client disconnected (%d total)", len(_ws_clients))
+
+
+async def run_websocket_server(host: str, port: int) -> None:
+    global _ws_loop, _ws_queue
+    _ws_loop = asyncio.get_running_loop()
+    _ws_queue = asyncio.Queue()
+    asyncio.create_task(_ws_broadcast_worker())
+    async with websockets.serve(_ws_handler, host, port):
+        log.info("WebSocket live-push server listening on %s:%s", host, port)
+        await asyncio.Future()  # run until cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +680,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     p.add_argument("--log-level", default=env("LOG_LEVEL", "INFO"))
 
+    p.add_argument("--websocket", dest="websocket", action="store_true", default=env("WEBSOCKET", "true") == "true",
+                    help="Run the live-push WebSocket server citsviewer optionally connects to (see WS_URL there)")
+    p.add_argument("--no-websocket", dest="websocket", action="store_false")
+    p.add_argument("--ws-host", default=env("WS_HOST", "0.0.0.0"))
+    p.add_argument("--ws-port", type=int, default=int(env("WS_PORT", "8765")))
+
     return p.parse_args(argv)
+
+
+async def _run(args: argparse.Namespace, db: Database, client: mqtt.Client) -> None:
+    # paho-mqtt's own loop is synchronous; run it in a background thread so
+    # this (asyncio) coroutine can run the WebSocket server on the main
+    # thread. loop_start()/loop_stop() manage that thread for us.
+    client.loop_start()
+    try:
+        await run_websocket_server(args.ws_host, args.ws_port)
+    finally:
+        client.loop_stop()
 
 
 def main(argv: list[str]) -> int:
@@ -590,7 +713,11 @@ def main(argv: list[str]) -> int:
     log.info("Connecting to MQTT broker %s:%s (tls=%s insecure=%s)...",
              args.mqtt_host, args.mqtt_port, args.mqtt_tls, args.mqtt_insecure)
     client.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
-    client.loop_forever(retry_first_connection=True)
+
+    if args.websocket:
+        asyncio.run(_run(args, db, client))
+    else:
+        client.loop_forever(retry_first_connection=True)
     return 0
 
 

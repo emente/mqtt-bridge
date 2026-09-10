@@ -54,6 +54,18 @@ All settings can also be passed as CLI flags (`--mysql-host`, `--mqtt-user`,
 ...) or environment variables instead of `.env` -- see `python
 mqtt_to_mysql.py --help`.
 
+### Live push (WebSocket)
+
+By default this also runs a small WebSocket server (`WS_HOST`/`WS_PORT`,
+default `0.0.0.0:8765`) that citsviewer's frontend can optionally connect
+to for near-real-time updates instead of waiting for its next 4s poll. It
+does **not** duplicate the map data over the socket -- it just tells
+already-open browser tabs "something changed, poll api.php now" the moment
+a message is stored, so the actual data still comes from the same
+MySQL-backed HTTP endpoint it always has. Disable with `--no-websocket` /
+`WEBSOCKET=false` if you don't run citsviewer or don't want the extra
+listening port; nothing else depends on it.
+
 ## What gets stored where
 
 - **`packets`** -- raw archive of every `its/+/packet` payload received.
