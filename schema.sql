@@ -168,9 +168,19 @@ CREATE TABLE IF NOT EXISTS its_messages (
     KEY idx_its_messages_station_time (station_id, received_at),
     KEY idx_its_messages_type_time (message_type, received_at),
     KEY idx_its_messages_device_time (device_id, received_at),
+    -- Backs citsviewer's "also seen on..." lookup (api.php grouping
+    -- source_mac -> station_id to find other sessions of the same physical
+    -- device, e.g. across a pseudonym change): without this, that GROUP BY
+    -- is a full scan of this table, which is unbounded and only grows.
+    KEY idx_its_messages_mac (source_mac),
     CONSTRAINT fk_its_messages_packet FOREIGN KEY (packet_id) REFERENCES packets (id)
         ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before idx_its_messages_mac
+-- existed? Run this instead of re-running the CREATE TABLE above:
+--
+-- ALTER TABLE its_messages ADD KEY idx_its_messages_mac (source_mac);
 
 -- ---------------------------------------------------------------------------
 -- CAM history (append-only time series, for trails / playback / heatmaps)
