@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS device_stats (
     sniffer_queued           SMALLINT UNSIGNED NULL,
     sniffer_queue_size       SMALLINT UNSIGNED NULL,
     sniffer_rssi_dbm         SMALLINT NULL,
+    sniffer_temp_c           DECIMAL(5,2) NULL,
     sniffer_age_ms           BIGINT UNSIGNED NULL,
     -- The bridge's own SD card (packet logging, see SD_CARD.md) -- not the
     -- sniffer's. sd_found reflects whether SD.begin() succeeded at boot;
@@ -121,6 +122,12 @@ CREATE TABLE IF NOT EXISTS device_stats (
 -- ALTER TABLE device_stats
 --     ADD COLUMN sd_found           BOOLEAN NULL,
 --     ADD COLUMN sd_packets_written BIGINT UNSIGNED NULL;
+--
+-- Migrating an existing database created before sniffer_temp_c existed
+-- (esp32-c5-sniffer firmware gained a temperatureRead() report)? Run this
+-- instead:
+--
+-- ALTER TABLE device_stats ADD COLUMN sniffer_temp_c DECIMAL(5,2) NULL;
 
 -- ---------------------------------------------------------------------------
 -- Raw packet archive (its/<device_id>/packet, before decoding)

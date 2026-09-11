@@ -202,13 +202,13 @@ def handle_stats(db: Database, device_id: str, payload: bytes) -> None:
         """
         INSERT INTO device_stats (device_id, received_at, temp_c, rssi_dbm,
                                    sniffer_uptime_ms, sniffer_sent_packets, sniffer_dropped_packets,
-                                   sniffer_queued, sniffer_queue_size, sniffer_rssi_dbm, sniffer_age_ms,
+                                   sniffer_queued, sniffer_queue_size, sniffer_rssi_dbm, sniffer_temp_c, sniffer_age_ms,
                                    sd_found, sd_packets_written)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (device_id, now, stats.get("temp"), stats.get("rssi"),
          sniffer.get("uptime_ms"), sniffer.get("sent"), sniffer.get("dropped"),
-         sniffer.get("queued"), sniffer.get("queue_size"), sniffer.get("rssi"), sniffer.get("age_ms"),
+         sniffer.get("queued"), sniffer.get("queue_size"), sniffer.get("rssi"), sniffer.get("temp_c"), sniffer.get("age_ms"),
          sd.get("found"), sd.get("packets_written")),
     )
     upsert_device_seen(db, device_id, now)
