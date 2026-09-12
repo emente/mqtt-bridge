@@ -140,10 +140,46 @@ CREATE TABLE IF NOT EXISTS packets (
     received_at     DATETIME(3)     NOT NULL,
     raw_len         SMALLINT UNSIGNED NOT NULL,
     raw_payload     VARBINARY(2600) NOT NULL,
+    -- SHA-256 of raw_payload. The bridge can legitimately re-publish a
+    -- packet it already sent live (e.g. `sdreplay` in SD_CARD.md resends
+    -- everything in /logs verbatim, and a reboot mid-write can replay the
+    -- tail of the current log file too); the UNIQUE KEY below makes
+    -- mqtt_to_mysql.py's INSERT IGNORE a no-op for those instead of
+    -- creating a second packets/its_messages/... row for the same frame.
+    -- Scoped per device_id since two different receivers legitimately
+    -- hearing the same over-the-air frame is real data, not a duplicate.
+    payload_hash    BINARY(32)      NOT NULL,
     lower_layer_error VARCHAR(255)  NULL,
     PRIMARY KEY (id),
-    KEY idx_packets_device_time (device_id, received_at)
+    KEY idx_packets_device_time (device_id, received_at),
+    UNIQUE KEY uq_packets_device_hash (device_id, payload_hash)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before payload_hash existed? Run
+-- this instead of re-running the CREATE TABLE above. BACK UP FIRST -- the
+-- dedup step below deletes rows (and cascades to their its_messages via the
+-- FK). It does NOT touch cam_messages/cpm_messages/etc., which don't carry
+-- a packet_id back-reference, so any past duplicate ingestion already
+-- fanned out into those append-only tables is not cleaned up here.
+--
+-- 1) Add the column and backfill it for existing rows:
+-- ALTER TABLE packets ADD COLUMN payload_hash BINARY(32) NULL;
+-- UPDATE packets SET payload_hash = UNHEX(SHA2(raw_payload, 256));
+--
+-- 2) See how many duplicate (device_id, payload_hash) groups exist:
+-- SELECT device_id, payload_hash, COUNT(*) AS n, GROUP_CONCAT(id ORDER BY id) AS ids
+--   FROM packets GROUP BY device_id, payload_hash HAVING COUNT(*) > 1;
+--
+-- 3) Delete the duplicates, keeping the lowest id (earliest received) in
+--    each group -- cascades to delete their its_messages rows too:
+-- DELETE p1 FROM packets p1
+--   JOIN packets p2 ON p1.device_id = p2.device_id
+--                  AND p1.payload_hash = p2.payload_hash
+--                  AND p1.id > p2.id;
+--
+-- 4) Now the UNIQUE KEY can be added:
+-- ALTER TABLE packets MODIFY payload_hash BINARY(32) NOT NULL,
+--     ADD UNIQUE KEY uq_packets_device_hash (device_id, payload_hash);
 
 -- ---------------------------------------------------------------------------
 -- Complete decode log: one row per ITS facility-layer PDU found in a packet.
@@ -223,8 +259,17 @@ CREATE TABLE IF NOT EXISTS cam_messages (
     PRIMARY KEY (id),
     KEY idx_cam_station_time (station_id, received_at),
     KEY idx_cam_device_time (device_id, received_at),
+    -- Backs mqtt_to_mysql.py's periodic retention cleanup (DELETE ... WHERE
+    -- received_at < cutoff); station_time/device_time above don't help
+    -- since received_at isn't their leading column.
+    KEY idx_cam_received_at (received_at),
     SPATIAL KEY idx_cam_position (position)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before idx_cam_received_at
+-- existed? Run this instead of re-running the CREATE TABLE above:
+--
+-- ALTER TABLE cam_messages ADD KEY idx_cam_received_at (received_at);
 
 -- ---------------------------------------------------------------------------
 -- "Live" latest-known position per station (fast source for a current map)
@@ -302,8 +347,17 @@ CREATE TABLE IF NOT EXISTS denm_events (
 
     PRIMARY KEY (originating_station_id, sequence_number),
     KEY idx_denm_active (is_active, last_received_at),
+    -- Backs mqtt_to_mysql.py's periodic retention cleanup (DELETE ... WHERE
+    -- last_received_at < cutoff); idx_denm_active doesn't help since
+    -- last_received_at isn't its leading column.
+    KEY idx_denm_last_received (last_received_at),
     SPATIAL KEY idx_denm_position (position)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before idx_denm_last_received
+-- existed? Run this instead of re-running the CREATE TABLE above:
+--
+-- ALTER TABLE denm_events ADD KEY idx_denm_last_received (last_received_at);
 
 -- ---------------------------------------------------------------------------
 -- CPM (Collective Perception Message): the sender's own position/type, plus
@@ -337,8 +391,17 @@ CREATE TABLE IF NOT EXISTS cpm_messages (
     PRIMARY KEY (id),
     KEY idx_cpm_station_time (station_id, received_at),
     KEY idx_cpm_device_time (device_id, received_at),
+    -- Backs mqtt_to_mysql.py's periodic retention cleanup (DELETE ... WHERE
+    -- received_at < cutoff); station_time/device_time above don't help
+    -- since received_at isn't their leading column.
+    KEY idx_cpm_received_at (received_at),
     SPATIAL KEY idx_cpm_position (position)
 ) ENGINE=InnoDB;
+
+-- Migrating an existing database created before idx_cpm_received_at
+-- existed? Run this instead of re-running the CREATE TABLE above:
+--
+-- ALTER TABLE cpm_messages ADD KEY idx_cpm_received_at (received_at);
 
 CREATE TABLE IF NOT EXISTS cpm_perceived_objects (
     id                        BIGINT UNSIGNED AUTO_INCREMENT,

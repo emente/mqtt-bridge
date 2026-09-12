@@ -13,11 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
 import ssl
 import sys
+import threading
+import time
 from typing import Any, Optional
 
 import paho.mqtt.client as mqtt
@@ -93,6 +96,37 @@ class Database:
                 with self.conn.cursor() as cur:
                     cur.execute(sql, params)
                     return cur.lastrowid
+            except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
+                if attempt == 2:
+                    raise
+                log.warning("MySQL connection lost (%s), reconnecting...", exc)
+                self.connect()
+        raise AssertionError("unreachable")
+
+    def execute_insert_ignore(self, sql: str, params: tuple = ()) -> Optional[int]:
+        """Like execute(), but for an `INSERT IGNORE` guarded by a UNIQUE
+        key: returns None (instead of a row id) when the row already
+        existed and the insert was therefore ignored."""
+        for attempt in (1, 2):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return cur.lastrowid if cur.rowcount else None
+            except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
+                if attempt == 2:
+                    raise
+                log.warning("MySQL connection lost (%s), reconnecting...", exc)
+                self.connect()
+        raise AssertionError("unreachable")
+
+    def execute_delete(self, sql: str, params: tuple = ()) -> int:
+        """Like execute(), but for a DELETE (or other statement whose
+        row-affected count matters more than lastrowid): returns rowcount."""
+        for attempt in (1, 2):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return cur.rowcount
             except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as exc:
                 if attempt == 2:
                     raise
@@ -443,17 +477,80 @@ def store_mapem(db: Database, device_id: str, station_id: int, now: datetime.dat
         )
 
 
+# ---------------------------------------------------------------------------
+# Retention: periodically trim CAM/DENM/CPM data older than N days.
+#
+# Deliberately scoped to just these three -- they're the high-volume,
+# per-vehicle traffic (CAM/CPM arrive continuously per station at up to
+# several Hz; DENM events accumulate one row per hazard ever seen with
+# nothing else currently pruning them despite schema.sql's top comment
+# assuming denm_events "stays small"). `packets`/`its_messages` (the raw/
+# decode audit trail) and the traffic-light/intersection state tables are
+# intentionally left alone here -- that's a separate retention decision.
+# ---------------------------------------------------------------------------
+
+def _delete_older_than(db: Database, table: str, column: str, cutoff: datetime.datetime,
+                        batch_size: int = 5000) -> int:
+    # Deleted in batches rather than one giant DELETE: these tables are
+    # exactly the ones that grow unbounded, so the first run against a
+    # long-neglected database could otherwise try to delete millions of
+    # rows in a single transaction, holding locks and growing the undo log
+    # for a long time. A plain `DELETE ... LIMIT` loop keeps each statement
+    # small and lets other queries interleave between batches.
+    total = 0
+    while True:
+        n = db.execute_delete(
+            f"DELETE FROM {table} WHERE {column} < %s LIMIT %s",
+            (cutoff, batch_size),
+        )
+        total += n
+        if n < batch_size:
+            return total
+
+
+def cleanup_old_data(db: Database, max_age_days: int) -> None:
+    cutoff = utcnow() - datetime.timedelta(days=max_age_days)
+
+    n_cam = _delete_older_than(db, "cam_messages", "received_at", cutoff)
+    # cpm_perceived_objects rows cascade-delete via fk_cpm_perceived_objects_message.
+    n_cpm = _delete_older_than(db, "cpm_messages", "received_at", cutoff)
+    n_denm = _delete_older_than(db, "denm_events", "last_received_at", cutoff)
+
+    if n_cam or n_cpm or n_denm:
+        log.info("Cleanup: deleted %d cam_messages, %d cpm_messages, %d denm_events older than %d days",
+                  n_cam, n_cpm, n_denm, max_age_days)
+
+
+def _cleanup_loop(db: Database, interval_s: float, max_age_days: int) -> None:
+    while True:
+        try:
+            cleanup_old_data(db, max_age_days)
+        except Exception:
+            log.exception("Periodic cleanup failed")
+        time.sleep(interval_s)
+
+
 def handle_packet(db: Database, device_id: str, topic: str, payload: bytes) -> None:
     now = utcnow()
+    payload_hash = hashlib.sha256(payload).digest()
 
-    packet_id = db.execute(
+    # INSERT IGNORE + the (device_id, payload_hash) UNIQUE key in schema.sql:
+    # the bridge can legitimately re-publish a packet it already sent live
+    # (sdreplay resends everything logged to SD, and a reboot mid-write can
+    # replay the tail of the current log file too). Without this, the same
+    # over-the-air frame would get decoded and stored all over again.
+    packet_id = db.execute_insert_ignore(
         """
-        INSERT INTO packets (device_id, mqtt_topic, received_at, raw_len, raw_payload)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT IGNORE INTO packets (device_id, mqtt_topic, received_at, raw_len, raw_payload, payload_hash)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (device_id, topic, now, len(payload), payload),
+        (device_id, topic, now, len(payload), payload, payload_hash),
     )
     upsert_device_seen(db, device_id, now)
+
+    if packet_id is None:
+        log.debug("[%s] duplicate packet (already ingested), skipping", device_id)
+        return
 
     try:
         layers = its_layers.parse_lower_layers(payload)
@@ -691,6 +788,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--ws-host", default=env("WS_HOST", "0.0.0.0"))
     p.add_argument("--ws-port", type=int, default=int(env("WS_PORT", "8765")))
 
+    p.add_argument("--cleanup", dest="cleanup", action="store_true", default=env("CLEANUP", "true") == "true",
+                    help="Periodically delete CAM/DENM/CPM rows older than --cleanup-max-age-days")
+    p.add_argument("--no-cleanup", dest="cleanup", action="store_false")
+    p.add_argument("--cleanup-interval-hours", type=float, default=float(env("CLEANUP_INTERVAL_HOURS", "1")))
+    p.add_argument("--cleanup-max-age-days", type=int, default=int(env("CLEANUP_MAX_AGE_DAYS", "7")))
+
     return p.parse_args(argv)
 
 
@@ -715,14 +818,32 @@ def main(argv: list[str]) -> int:
     db = Database(args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_database)
     client = make_mqtt_client(args, db)
 
+    if args.cleanup:
+        log.info("Cleanup enabled: CAM/DENM/CPM older than %d days, checked every %.1fh",
+                  args.cleanup_max_age_days, args.cleanup_interval_hours)
+        # Its own Database (own pymysql connection), not `db`: `db` is only
+        # ever touched from the MQTT callback thread today, and pymysql
+        # connections aren't safe to share across threads without locking.
+        cleanup_db = Database(args.mysql_host, args.mysql_port, args.mysql_user,
+                               args.mysql_password, args.mysql_database)
+        threading.Thread(
+            target=_cleanup_loop,
+            args=(cleanup_db, args.cleanup_interval_hours * 3600, args.cleanup_max_age_days),
+            name="cleanup", daemon=True,
+        ).start()
+
     log.info("Connecting to MQTT broker %s:%s (tls=%s insecure=%s)...",
              args.mqtt_host, args.mqtt_port, args.mqtt_tls, args.mqtt_insecure)
     client.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
 
-    if args.websocket:
-        asyncio.run(_run(args, db, client))
-    else:
-        client.loop_forever(retry_first_connection=True)
+    try:
+        if args.websocket:
+            asyncio.run(_run(args, db, client))
+        else:
+            client.loop_forever(retry_first_connection=True)
+    except KeyboardInterrupt:
+        log.info("Interrupted, shutting down")
+        return 130
     return 0
 
 
